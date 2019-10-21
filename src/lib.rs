@@ -1,5 +1,3 @@
-#![feature(proc_macro)]
-
 extern crate crypto;
 #[macro_use]
 extern crate hyper;
