@@ -1,15 +1,4 @@
 #![deny(rust_2018_idioms)]
-use crypto;
-use hyper;
-#[macro_use]
-use lazy_static;
-use rustc_serialize as serialize;
-use serde;
-use serde_derive;
-use serde_json;
-use ::time as time2;
-use url;
-
 /// Contains shared functionality between all the different
 /// modules inside of the Azure Libary
 ///

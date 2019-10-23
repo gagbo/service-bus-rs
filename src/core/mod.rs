@@ -8,7 +8,7 @@ use crypto::sha2::*;
 use ::time as time2;
 
 use rustc_serialize::base64::{self, ToBase64};
-use percent_encoding::utf8_percent_encode;
+use percent_encoding::{utf8_percent_encode, NON_ALPHANUMERIC};
 
 /// This function generates a sas token for authenticating into azure
 /// using the connection string provided on portal.azure.com.
@@ -43,14 +43,14 @@ pub fn generate_sas(
     let mut h = Hmac::new(Sha256::new(), key.as_bytes());
 
     let time2_duration = time2::Duration::from_std(duration).unwrap_or(time2::Duration::seconds(0));
-    let encoded_url: String = utf8_percent_encode(endpoint).collect();
+    let encoded_url: String = utf8_percent_encode(endpoint, NON_ALPHANUMERIC).collect();
     let expiry = (time2::now_utc() + time2_duration).to_timespec().sec;
 
     let message = format!("{}\n{}", encoded_url, expiry);
     h.input(message.as_bytes());
 
     let mut sig: String = h.result().code().to_base64(base64::STANDARD);
-    sig = utf8_percent_encode(&sig).collect();
+    sig = utf8_percent_encode(&sig, NON_ALPHANUMERIC).collect();
 
     let sas = format!(
         "SharedAccessSignature sig={}&se={}&skn={}&sr={}",

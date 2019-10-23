@@ -1,5 +1,4 @@
-#[macro_use]
-use lazy_static;
+use lazy_static::lazy_static;
 use std::cell::RefCell;
 use std::sync::Mutex;
 use std::time::Duration;

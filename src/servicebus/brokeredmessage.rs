@@ -1,5 +1,4 @@
-#[macro_use]
-use lazy_static;
+use lazy_static::lazy_static;
 use crate::core::error::AzureRequestError;
 use hyper::header::HeaderName;
 use hyper::Response;
