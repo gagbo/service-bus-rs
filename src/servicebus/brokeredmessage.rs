@@ -1,9 +1,11 @@
 use lazy_static::lazy_static;
 use crate::core::error::AzureRequestError;
 use hyper::header::HeaderName;
-use hyper::Response;
+use hyper::{Response, body::Body};
+use futures::{future::Future, stream::Stream};
 use serde_derive::{Deserialize, Serialize};
 use serde_json;
+use std::str;
 
 pub const BROKER_PROPERTIES_HEADER_NAME: &'static str = "brokerproperties";
 lazy_static! {
@@ -121,8 +123,8 @@ impl BrokeredMessage {
     /// lazily in the event that the body is malformed or not serialized.
     /// The message can still be completed or the body can be parsed from its raw contents.
     ///
-    pub fn with_response(mut response: Response<String>) -> BrokeredMessage {
-        let mut body = response.body().to_owned();
+    pub fn with_response(mut response: Response<Body>) -> BrokeredMessage {
+        let mut body = response.body().collect().wait().unwrap();
 
         let props = response
             .headers()
@@ -133,7 +135,7 @@ impl BrokeredMessage {
             .unwrap_or(Default::default());
 
         BrokeredMessage {
-            body,
+            body: body.iter().map(|chunk| str::from_utf8(&chunk.into_bytes()).unwrap_or("COULD NOT CONVERT")).collect::<String>(),
             props: Box::new(props),
         }
     }

@@ -2,6 +2,7 @@ use lazy_static::lazy_static;
 use std::cell::RefCell;
 use std::sync::Mutex;
 use std::time::Duration;
+use futures::future::Future;
 
 use crate::core::error::AzureRequestError;
 use crate::core::generate_sas;
@@ -10,9 +11,9 @@ use crate::servicebus::brokeredmessage::BrokeredMessage;
 use hyper::{
     client::HttpConnector,
     header::{HeaderMap, HeaderValue, AUTHORIZATION},
-    Body, Client, StatusCode,
+    Body, Client, Request, StatusCode,
 };
-use ::time as time2;
+use time as time2;
 use url;
 
 const SAS_BUFFER_TIME: usize = 15;
@@ -93,12 +94,16 @@ where
             timeout.as_secs()
         );
 
-        let uri = self.endpoint().join(&path)?;
+        let uri = self.endpoint().join(&path)?.as_str();
         let mut header = HeaderMap::new();
         header.insert(AUTHORIZATION, HeaderValue::from_str(&sas).unwrap());
+        let req = Request::builder()
+            .method("DELETE")
+            .uri(uri).body(Body::empty()).unwrap();
+        *(req.headers_mut()) = header;
 
-        let response = CLIENT.delete(uri).headers(header).send()?;
-        interpret_results(response.status)?;
+        let response = CLIENT.request(req).wait()?;
+        interpret_results(response.status())?;
         Ok(BrokeredMessage::with_response(response))
     }
 
@@ -118,12 +123,17 @@ where
             timeout.as_secs()
         );
 
-        let uri = self.endpoint().join(&path)?;
+        let uri = self.endpoint().join(&path)?.as_str();
 
         let mut header = HeaderMap::new();
         header.insert(AUTHORIZATION, HeaderValue::from_str(&sas).unwrap());
-        let response = CLIENT.post(uri).headers(header).send()?;
-        interpret_results(response.status)?;
+        let req = Request::builder()
+            .method("POST")
+            .uri(uri).body(Body::empty()).unwrap();
+        *(req.headers_mut()) = header;
+
+        let response = CLIENT.request(req).wait()?;
+        interpret_results(response.status())?;
         Ok(BrokeredMessage::with_response(response))
     }
 
@@ -140,12 +150,17 @@ where
 
         // Take either the Sequence number or the Message ID
         // Then add the lock token and finally join it into the targer
-        let target = get_message_update_path(self, &message)?;
+        let target = get_message_update_path(self, &message)?.as_str();
 
         let mut header = HeaderMap::new();
         header.insert(AUTHORIZATION, HeaderValue::from_str(&sas).unwrap());
-        let response = CLIENT.delete(target).headers(header).send()?;
-        interpret_results(response.status)
+        let req= Request::builder()
+            .method("DELETE")
+            .uri(target).body(Body::empty()).unwrap();
+        *(req.headers_mut()) = header;
+
+        let response = CLIENT.request(req).wait()?;
+        interpret_results(response.status())
     }
 
     /// Releases the lock on a message and puts it back into the queue.
@@ -156,12 +171,17 @@ where
 
         // Take either the Sequence number or the Message ID
         // Then add the lock token and finally join it into the targer
-        let target = get_message_update_path(self, &message)?;
+        let target = get_message_update_path(self, &message)?.as_str();
 
         let mut header = HeaderMap::new();
         header.insert(AUTHORIZATION, HeaderValue::from_str(&sas).unwrap());
-        let response = CLIENT.put(target).headers(header).send()?;
-        interpret_results(response.status)
+        let req = Request::builder()
+            .method("PUT")
+            .uri(target).body(Body::empty()).unwrap();
+        *(req.headers_mut()) = header;
+
+        let response = CLIENT.request(req).wait()?;
+        interpret_results(response.status())
     }
 
     /// Renews the lock on a message. If a message is received by calling
@@ -184,12 +204,17 @@ where
 
         // Take either the Sequence number or the Message ID
         // Then add the lock token and finally join it into the targer
-        let target = get_message_update_path(self, &message)?;
+        let target = get_message_update_path(self, &message)?.as_str();
 
         let mut header = HeaderMap::new();
         header.insert(AUTHORIZATION, HeaderValue::from_str(&sas).unwrap());
-        let response = CLIENT.post(target).headers(header).send()?;
-        interpret_results(response.status)
+        let req = Request::builder()
+            .method("POST")
+            .uri(target).body(Body::empty()).unwrap();
+        *(req.headers_mut()) = header;
+
+        let response = CLIENT.request(req).wait()?;
+        interpret_results(response.status())
     }
 
     /// Creates an event loop for handling messages that blocks the current thread.
