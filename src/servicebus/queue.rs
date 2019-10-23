@@ -1,25 +1,30 @@
-use std::time::Duration;
 use std::cell::RefCell;
 use std::sync::Mutex;
+use std::time::Duration;
 
-use core::generate_sas;
-use core::error::AzureRequestError;
-use super::brokeredmessage::*;
+use crate::core::error::AzureRequestError;
+use crate::core::generate_sas;
+use crate::servicebus::brokeredmessage::{BrokeredMessage, BROKER_PROPERTIES_HEADER};
 
+use hyper::{
+    client::HttpConnector,
+    header::{HeaderMap, HeaderValue, AUTHORIZATION, CONTENT_TYPE},
+    Body, Client, StatusCode,
+};
+use mime::Mime;
+use ::time as time2;
 use url;
-use time2;
-use hyper::client::Client;
-use hyper::header::*;
-use hyper::status::StatusCode;
-use hyper::mime::Mime;
 
-const CONTENT_TYPE: &'static str = "application/atom+xml;type=entry;charset=utf-8";
+const UNIQUE_CONTENT_TYPE: &'static str = "application/atom+xml;type=entry;charset=utf-8";
 const SAS_BUFFER_TIME: usize = 15;
 
 // Ideally this should be a field on the client, but we don't want to expose it through
 // the trait, and if we don't then we can't share code.
-lazy_static!{
-    static ref CLIENT: Client = Client::new();
+lazy_static! {
+    static ref CLIENT: Client<HttpConnector, Body> = Client::builder()
+        .keep_alive(true)
+        .http2_only(true)
+        .build_http();
 }
 
 /// The Queue Trait is an abstraction over different types of Queues that
@@ -38,7 +43,8 @@ lazy_static!{
 /// when there is asyncronous processing that needs to be done. Producers can add messages to the queue
 /// and not need to be concerned with whether there is a process running to consume the message immediately.
 pub trait Queue
-    where Self: Sized
+where
+    Self: Sized,
 {
     /// The queue name.
     fn queue(&self) -> &str;
@@ -85,44 +91,52 @@ pub trait Queue
     }
 
     /// Sends a message to the Service Bus Queue with a designated timeout.
-    fn send_with_timeout(&self,
-                         message: BrokeredMessage,
-                         timeout: Duration)
-                         -> Result<(), AzureRequestError> {
-
+    fn send_with_timeout(
+        &self,
+        message: BrokeredMessage,
+        timeout: Duration,
+    ) -> Result<(), AzureRequestError> {
         let sas = self.refresh_sas();
         let path = format!("{}/messages?timeout={}", self.queue(), timeout.as_secs());
         let uri = self.endpoint().join(&*path)?;
 
-        let mut header = Headers::new();
-        header.set(Authorization(sas));
+        let mut header = HeaderMap::new();
+        header.insert(AUTHORIZATION, HeaderValue::from_str(&sas).unwrap());
 
         // This will always succeed.
-        let content_type: Mime = CONTENT_TYPE.parse().unwrap();
-        header.set(ContentType(content_type));
-        header.set(BrokerPropertiesHeader(message.props_as_json()));
+        let content_type: Mime = UNIQUE_CONTENT_TYPE.parse().unwrap();
+        header.insert(CONTENT_TYPE, HeaderValue::from_str(&content_type).unwrap());
+        header.insert(
+            BROKER_PROPERTIES_HEADER,
+            HeaderValue::from_str(&message.props_as_json()).unwrap(),
+        );
 
-        let response = CLIENT.post(uri).headers(header).body(message.get_body_raw()).send()?;
+        let response = CLIENT
+            .post(uri)
+            .headers(header)
+            .body(message.get_body_raw())
+            .send()?;
         interpret_results(response.status)
     }
 
     /// Receive a message from the queue. Returns the deserialized message or an error.
     /// The message is deleted from the queue when it is received. If the application crashes,
     /// the contents of the message can be lost.
-    fn receive_and_delete_with_timeout(&self,
-                                       timeout: Duration)
-                                       -> Result<BrokeredMessage, AzureRequestError> {
-
+    fn receive_and_delete_with_timeout(
+        &self,
+        timeout: Duration,
+    ) -> Result<BrokeredMessage, AzureRequestError> {
         let sas = self.refresh_sas();
-        let path = format!("{}/messages/head?timeout={}",
-                           self.queue(),
-                           timeout.as_secs());
+        let path = format!(
+            "{}/messages/head?timeout={}",
+            self.queue(),
+            timeout.as_secs()
+        );
 
         let uri = self.endpoint().join(&path)?;
-        let mut header = Headers::new();
-        header.set(Authorization(sas));
+        let mut header = HeaderMap::new();
+        header.insert(AUTHORIZATION, HeaderValue::from_str(&sas).unwrap());
         let response = CLIENT.delete(uri).headers(header).send()?;
-
 
         interpret_results(response.status)?;
         Ok(BrokeredMessage::with_response(response))
@@ -132,19 +146,21 @@ pub trait Queue
     /// detailing what went wrong. The message will not be deleted on the server until
     /// `queue_client.complete_message(message)` is called. This is ideal for applications that
     /// can't afford to miss a message. Allows a timeout to be specified for greater control.
-    fn receive_with_timeout(&self,
-                            timeout: Duration)
-                            -> Result<BrokeredMessage, AzureRequestError> {
-
+    fn receive_with_timeout(
+        &self,
+        timeout: Duration,
+    ) -> Result<BrokeredMessage, AzureRequestError> {
         let sas = self.refresh_sas();
-        let path = format!("{}/messages/head?timeout={}",
-                           self.queue(),
-                           timeout.as_secs());
+        let path = format!(
+            "{}/messages/head?timeout={}",
+            self.queue(),
+            timeout.as_secs()
+        );
 
         // Build the URI
         let uri = self.endpoint().join(&path)?;
-        let mut header = Headers::new();
-        header.set(Authorization(sas));
+        let mut header = HeaderMap::new();
+        header.insert(AUTHORIZATION, HeaderValue::from_str(&sas).unwrap());
 
         // Send the request and wait for the response
         let response = CLIENT.post(uri).headers(header).send()?;
@@ -168,11 +184,10 @@ pub trait Queue
         // Then add the lock token and finally join it into the targer
         let target = get_message_update_path(self, &message)?;
 
-        let mut header = Headers::new();
-        header.set(Authorization(sas));
+        let mut header = HeaderMap::new();
+        header.insert(AUTHORIZATION, HeaderValue::from_str(&sas).unwrap());
         let response = CLIENT.delete(target).headers(header).send()?;
         interpret_results(response.status)
-
     }
 
     /// Releases the lock on a message and puts it back into the queue.
@@ -184,12 +199,11 @@ pub trait Queue
         // Take either the Sequence number or the Message ID
         // Then add the lock token and finally join it into the targer
         let target = get_message_update_path(self, &message)?;
-        let mut header = Headers::new();
-        header.set(Authorization(sas));
+        let mut header = HeaderMap::new();
+        header.insert(AUTHORIZATION, HeaderValue::from_str(&sas).unwrap());
 
         let response = CLIENT.put(target).headers(header).send()?;
         interpret_results(response.status)
-
     }
 
     /// Renews the lock on a message. If a message is received by calling
@@ -214,11 +228,10 @@ pub trait Queue
         // Then add the lock token and finally join it into the targer
         let target = get_message_update_path(self, &message)?;
 
-        let mut header = Headers::new();
-        header.set(Authorization(sas));
+        let mut header = HeaderMap::new();
+        header.insert(AUTHORIZATION, HeaderValue::from_str(&sas).unwrap());
         let response = CLIENT.post(target).headers(header).send()?;
         interpret_results(response.status)
-
     }
 
     /// Creates an event loop for handling messages that blocks the current thread.
@@ -230,7 +243,8 @@ pub trait Queue
     /// });
     /// ```
     fn on_message<H>(&self, handler: H) -> AzureRequestError
-        where H: Fn(BrokeredMessage)
+    where
+        H: Fn(BrokeredMessage),
     {
         loop {
             let res = self.receive_and_delete();
@@ -257,9 +271,10 @@ impl QueueClient {
     /// Create a new queue with a connection string and the name of a queue.
     /// The connection string can be copied and pasted from the azure portal.
     /// The queue name should be the name of an existing queue.
-    pub fn with_conn_and_queue(connection_string: &str,
-                               queue: &str)
-                               -> Result<QueueClient, url::ParseError> {
+    pub fn with_conn_and_queue(
+        connection_string: &str,
+        queue: &str,
+    ) -> Result<QueueClient, url::ParseError> {
         let duration = Duration::from_secs(60 * 6);
         let mut endpoint = String::new();
         for param in connection_string.split(";") {
@@ -278,7 +293,7 @@ impl QueueClient {
         }
         endpoint = String::new() + "https" + endpoint.split_at(endpoint.find(":").unwrap_or(0)).1;
         let url = url::Url::parse(&endpoint)?;
-        let (sas_key, expiry) = generate_sas(connection_string, duration);
+        let (sas_key, expiry) = generate_sas(connection_string, duration).unwrap();
         let conn_string = connection_string.to_string();
 
         Ok(QueueClient {
@@ -304,7 +319,7 @@ impl Queue for QueueClient {
         let mut sas_tuple = self.sas_info.borrow_mut();
         if curr_time > sas_tuple.1 {
             let duration = Duration::from_secs(60 * 6);
-            let (key, expiry) = generate_sas(&*self.connection_string, duration);
+            let (key, expiry) = generate_sas(&*self.connection_string, duration).unwrap();
             sas_tuple.1 = expiry;
             sas_tuple.0 = key;
         }
@@ -334,9 +349,10 @@ pub struct ConcurrentQueueClient {
 }
 
 impl ConcurrentQueueClient {
-    pub fn with_conn_and_queue(connection_string: &str,
-                               queue: &str)
-                               -> Result<ConcurrentQueueClient, url::ParseError> {
+    pub fn with_conn_and_queue(
+        connection_string: &str,
+        queue: &str,
+    ) -> Result<ConcurrentQueueClient, url::ParseError> {
         let duration = Duration::from_secs(60 * 6);
         let mut endpoint = String::new();
         for param in connection_string.split(";") {
@@ -355,7 +371,7 @@ impl ConcurrentQueueClient {
         }
         endpoint = String::new() + "https" + endpoint.split_at(endpoint.find(":").unwrap_or(0)).1;
         let url = url::Url::parse(&endpoint)?;
-        let (sas_key, expiry) = generate_sas(connection_string, duration);
+        let (sas_key, expiry) = generate_sas(connection_string, duration).unwrap();
         let conn_string = connection_string.to_string();
 
         Ok(ConcurrentQueueClient {
@@ -384,7 +400,7 @@ impl Queue for ConcurrentQueueClient {
         };
         if curr_time > sas_tuple.1 {
             let duration = Duration::from_secs(60 * 6);
-            let (key, expiry) = generate_sas(&*self.connection_string, duration);
+            let (key, expiry) = generate_sas(&*self.connection_string, duration).unwrap();
             sas_tuple.1 = expiry;
             sas_tuple.0 = key;
         }
@@ -392,35 +408,36 @@ impl Queue for ConcurrentQueueClient {
     }
 }
 
-
 // Here's one function that interprets what all of the error codes mean for consistency.
 // This might even get elevated out of this module, but preferabbly not.
 fn interpret_results(status: StatusCode) -> Result<(), AzureRequestError> {
-    use core::error::AzureRequestError::*;
+    use crate::core::error::AzureRequestError::*;
     match status {
-        StatusCode::Unauthorized => Err(AuthorizationFailure),
-        StatusCode::InternalServerError => Err(InternalError),
-        StatusCode::BadRequest => Err(BadRequest),
-        StatusCode::Forbidden => Err(ResourceFailure),
-        StatusCode::Gone => Err(ResourceNotFound),
+        StatusCode::UNAUTHORIZED => Err(AuthorizationFailure),
+        StatusCode::INTERNAL_SERVER_ERROR => Err(InternalError),
+        StatusCode::BAD_REQUEST => Err(BadRequest),
+        StatusCode::FORBIDDEN => Err(ResourceFailure),
+        StatusCode::GONE => Err(ResourceNotFound),
         // These are the successful cases.
-        StatusCode::Created => Ok(()),
-        StatusCode::Ok => Ok(()),
+        StatusCode::CREATED => Ok(()),
+        StatusCode::OK => Ok(()),
         _ => Err(UnknownError),
     }
 }
 
 // Complete, Abandon, Renew all make calls to the same Uri so here's a quick function
 // for generating it.
-fn get_message_update_path<T>(q: &T,
-                              message: &BrokeredMessage)
-                              -> Result<url::Url, AzureRequestError>
-    where T: Queue
+fn get_message_update_path<T>(
+    q: &T,
+    message: &BrokeredMessage,
+) -> Result<url::Url, AzureRequestError>
+where
+    T: Queue,
 {
-
     // Take either the Sequence number or the Message ID
     // Then add the lock token and finally join it into the targer
-    let target = message.props
+    let target = message
+        .props
         .SequenceNumber
         .map(|seq| seq.to_string())
         .or(message.props.MessageId.clone())
@@ -436,11 +453,11 @@ mod tests {
     use super::*;
     use servicebus::brokeredmessage::BrokeredMessage;
 
-    lazy_static!{
+    lazy_static! {
         static ref CONNECTION_STRING: String = {
-            use std::io::BufReader;
             use std::fs::File;
             use std::io::prelude::*;
+            use std::io::BufReader;
             let mut s = String::new();
             let mut reader = BufReader::new(File::open("connection_string.txt").unwrap());
             reader.read_line(&mut s).unwrap();
@@ -476,73 +493,73 @@ mod tests {
     #[test]
     fn queue_complete_message() {
         let queue = QueueClient::with_conn_and_queue(&CONNECTION_STRING, "test1").unwrap();
-        queue.send(BrokeredMessage::with_body("Complete this message")).unwrap();
+        queue
+            .send(BrokeredMessage::with_body("Complete this message"))
+            .unwrap();
         match queue.receive() {
             Err(e) => {
                 println!("{:?}", e);
                 panic!("Failed to receive message.")
             }
-            Ok(message) => {
-                match queue.complete_message(message.clone()) {
-                    Err(e) => {
-                        println!("{:?}", e);
-                        println!("{:?}", message);
-                        panic!("Failed to complete the message");
-                    }
-                    _ => {}
+            Ok(message) => match queue.complete_message(message.clone()) {
+                Err(e) => {
+                    println!("{:?}", e);
+                    println!("{:?}", message);
+                    panic!("Failed to complete the message");
                 }
-            }
+                _ => {}
+            },
         }
     }
 
     #[test]
     fn queue_abandon_message() {
         let queue = QueueClient::with_conn_and_queue(&CONNECTION_STRING, "test1").unwrap();
-        queue.send(BrokeredMessage::with_body("Complete this message")).unwrap();
+        queue
+            .send(BrokeredMessage::with_body("Complete this message"))
+            .unwrap();
         match queue.receive() {
             Err(e) => {
                 println!("{:?}", e);
                 panic!("Failed to receive message.")
             }
-            Ok(message) => {
-                match queue.abandon_message(message.clone()) {
-                    Err(e) => {
-                        println!("{:?}", e);
-                        println!("{:?}", message);
-                        panic!("Failed to abandon the message");
-                    }
-                    _ => {}
+            Ok(message) => match queue.abandon_message(message.clone()) {
+                Err(e) => {
+                    println!("{:?}", e);
+                    println!("{:?}", message);
+                    panic!("Failed to abandon the message");
                 }
-            }
+                _ => {}
+            },
         }
     }
 
     #[test]
     fn queue_renew_message() {
         let queue = QueueClient::with_conn_and_queue(&CONNECTION_STRING, "test1").unwrap();
-        queue.send(BrokeredMessage::with_body("Complete this message")).unwrap();
+        queue
+            .send(BrokeredMessage::with_body("Complete this message"))
+            .unwrap();
         match queue.receive() {
             Err(e) => {
                 println!("{:?}", e);
                 panic!("Failed to receive message.")
             }
-            Ok(message) => {
-                match queue.renew_message(message.clone()) {
-                    Err(e) => {
-                        println!("{:?}", e);
-                        println!("{:?}", message);
-                        panic!("Failed to renew the message");
-                    }
-                    _ => {}
+            Ok(message) => match queue.renew_message(message.clone()) {
+                Err(e) => {
+                    println!("{:?}", e);
+                    println!("{:?}", message);
+                    panic!("Failed to renew the message");
                 }
-            }
+                _ => {}
+            },
         }
     }
 
     #[test]
     fn conncurrent_queue_send_message() {
-        let queue = ConcurrentQueueClient::with_conn_and_queue(&CONNECTION_STRING, "test1")
-            .unwrap();
+        let queue =
+            ConcurrentQueueClient::with_conn_and_queue(&CONNECTION_STRING, "test1").unwrap();
         let message = BrokeredMessage::with_body("Cats and Dogs");
         match queue.send(message) {
             Err(e) => {
@@ -555,8 +572,8 @@ mod tests {
 
     #[test]
     fn concurrent_queue_receive_message() {
-        let queue = ConcurrentQueueClient::with_conn_and_queue(&CONNECTION_STRING, "test1")
-            .unwrap();
+        let queue =
+            ConcurrentQueueClient::with_conn_and_queue(&CONNECTION_STRING, "test1").unwrap();
         match queue.receive_and_delete() {
             Err(e) => {
                 println!("{:?}", e);

@@ -1,25 +1,30 @@
-use std::time::Duration;
 use std::cell::RefCell;
 use std::sync::Mutex;
+use std::time::Duration;
 
-use core::generate_sas;
-use core::error::AzureRequestError;
-use super::brokeredmessage::*;
+use crate::core::error::AzureRequestError;
+use crate::core::generate_sas;
+use crate::servicebus::brokeredmessage::{BrokeredMessage, BROKER_PROPERTIES_HEADER};
 
+use hyper::{
+    client::HttpConnector,
+    header::{HeaderMap, HeaderValue, AUTHORIZATION, CONTENT_TYPE},
+    Body, Client, StatusCode,
+};
+use mime::Mime;
+use ::time as time2;
 use url;
-use time2;
-use hyper::client::Client;
-use hyper::header::*;
-use hyper::status::StatusCode;
-use hyper::mime::Mime;
 
-const CONTENT_TYPE: &'static str = "application/atom+xml;type=entry;charset=utf-8";
+const UNIQUE_CONTENT_TYPE: &'static str = "application/atom+xml;type=entry;charset=utf-8";
 const SAS_BUFFER_TIME: usize = 15;
 
 // Ideally this should be a field on the client, but we don't want to expose it through
 // the trait, and if we don't then we can't share code.
-lazy_static!{
-    static ref CLIENT: Client = Client::new();
+lazy_static! {
+    static ref CLIENT: Client<HttpConnector, Body> = Client::builder()
+        .keep_alive(true)
+        .http2_only(true)
+        .build_http();
 }
 
 /// The Topic Trait is an abstraction over different types of Topics that
@@ -41,7 +46,8 @@ lazy_static!{
 /// in a different subscription. This way different processes can consume the message and not interfere
 /// with each other or have to worry about losing messages.
 pub trait Topic
-    where Self: Sized
+where
+    Self: Sized,
 {
     /// The topic name.
     fn topic(&self) -> &str;
@@ -70,26 +76,29 @@ pub trait Topic
         self.send_with_timeout(message, timeout)
     }
 
-
     /// Sends a message to the Service Bus Topic with a designated timeout.
-    fn send_with_timeout(&self,
-                         message: BrokeredMessage,
-                         timeout: Duration)
-                         -> Result<(), AzureRequestError> {
-
+    fn send_with_timeout(
+        &self,
+        message: BrokeredMessage,
+        timeout: Duration,
+    ) -> Result<(), AzureRequestError> {
         let sas = self.refresh_sas();
         let path = format!("{}/messages?timeout={}", self.topic(), timeout.as_secs());
         let uri = self.endpoint().join(&path)?;
 
-        let mut header = Headers::new();
-        header.set(Authorization(sas));
+        let mut header = HeaderMap::new();
+        header.insert(AUTHORIZATION, HeaderValue::from_str(&sas).unwrap());
 
         // This will always succeed.
-        let content_type: Mime = CONTENT_TYPE.parse().unwrap();
-        header.set(ContentType(content_type));
-        header.set(BrokerPropertiesHeader(message.props_as_json()));
+        let content_type: Mime = UNIQUE_CONTENT_TYPE.parse().unwrap();
+        header.insert(CONTENT_TYPE, HeaderValue::from_str(&content_type).unwrap());
+        header.insert(BROKER_PROPERTIES_HEADER, HeaderValue::from_str(&message.props_as_json()).unwrap());
 
-        let response = CLIENT.post(uri).headers(header).body(message.get_body_raw()).send()?;
+        let response = CLIENT
+            .post(uri)
+            .headers(header)
+            .body(message.get_body_raw())
+            .send()?;
         interpret_results(response.status)
     }
 }
@@ -108,9 +117,10 @@ impl TopicClient {
     /// Create a new queue with a connection string and the name of a topic.
     /// The connection string can be copied and pasted from the azure portal.
     /// The queue name should be the name of an existing topic.
-    pub fn with_conn_and_topic(connection_string: &str,
-                               topic: &str)
-                               -> Result<TopicClient, url::ParseError> {
+    pub fn with_conn_and_topic(
+        connection_string: &str,
+        topic: &str,
+    ) -> Result<TopicClient, url::ParseError> {
         let duration = Duration::from_secs(60 * 6);
         let mut endpoint = String::new();
         for param in connection_string.split(";") {
@@ -129,7 +139,7 @@ impl TopicClient {
         }
         endpoint = String::new() + "https" + endpoint.split_at(endpoint.find(":").unwrap_or(0)).1;
         let url = url::Url::parse(&endpoint)?;
-        let (sas_key, expiry) = generate_sas(connection_string, duration);
+        let (sas_key, expiry) = generate_sas(connection_string, duration).unwrap();
         let conn_string = connection_string.to_string();
 
         Ok(TopicClient {
@@ -155,7 +165,7 @@ impl Topic for TopicClient {
         let mut sas_tuple = self.sas_info.borrow_mut();
         if curr_time > sas_tuple.1 {
             let duration = Duration::from_secs(60 * 6);
-            let (key, expiry) = generate_sas(&*self.connection_string, duration);
+            let (key, expiry) = generate_sas(&*self.connection_string, duration).unwrap();
             sas_tuple.1 = expiry;
             sas_tuple.0 = key;
         }
@@ -185,9 +195,10 @@ pub struct ConcurrentTopicClient {
 }
 
 impl ConcurrentTopicClient {
-    pub fn with_conn_and_topic(connection_string: &str,
-                               topic: &str)
-                               -> Result<ConcurrentTopicClient, url::ParseError> {
+    pub fn with_conn_and_topic(
+        connection_string: &str,
+        topic: &str,
+    ) -> Result<ConcurrentTopicClient, url::ParseError> {
         let duration = Duration::from_secs(60 * 6);
         let mut endpoint = String::new();
         for param in connection_string.split(";") {
@@ -206,7 +217,7 @@ impl ConcurrentTopicClient {
         }
         endpoint = String::new() + "https" + endpoint.split_at(endpoint.find(":").unwrap_or(0)).1;
         let url = url::Url::parse(&endpoint)?;
-        let (sas_key, expiry) = generate_sas(connection_string, duration);
+        let (sas_key, expiry) = generate_sas(connection_string, duration).unwrap();
         let conn_string = connection_string.to_string();
 
         Ok(ConcurrentTopicClient {
@@ -235,7 +246,7 @@ impl Topic for ConcurrentTopicClient {
         };
         if curr_time > sas_tuple.1 {
             let duration = Duration::from_secs(60 * 6);
-            let (key, expiry) = generate_sas(&*self.connection_string, duration);
+            let (key, expiry) = generate_sas(&*self.connection_string, duration).unwrap();
             sas_tuple.1 = expiry;
             sas_tuple.0 = key;
         }
@@ -243,20 +254,19 @@ impl Topic for ConcurrentTopicClient {
     }
 }
 
-
 // Here's one function that interprets what all of the error codes mean for consistency.
 // This might even get elevated out of this module, but preferabbly not.
 fn interpret_results(status: StatusCode) -> Result<(), AzureRequestError> {
-    use core::error::AzureRequestError::*;
+    use crate::core::error::AzureRequestError::*;
     match status {
-        StatusCode::Unauthorized => Err(AuthorizationFailure),
-        StatusCode::InternalServerError => Err(InternalError),
-        StatusCode::BadRequest => Err(BadRequest),
-        StatusCode::Forbidden => Err(ResourceFailure),
-        StatusCode::Gone => Err(ResourceNotFound),
+        StatusCode::UNAUTHORIZED => Err(AuthorizationFailure),
+        StatusCode::INTERNAL_SERVER_ERROR => Err(InternalError),
+        StatusCode::BAD_REQUEST => Err(BadRequest),
+        StatusCode::FORBIDDEN => Err(ResourceFailure),
+        StatusCode::GONE => Err(ResourceNotFound),
         // These are the successful cases.
-        StatusCode::Created => Ok(()),
-        StatusCode::Ok => Ok(()),
+        StatusCode::CREATED => Ok(()),
+        StatusCode::OK => Ok(()),
         _ => Err(UnknownError),
     }
 }

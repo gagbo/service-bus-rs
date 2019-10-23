@@ -1,23 +1,30 @@
-use std::time::Duration;
+#[macro_use]
+use lazy_static;
 use std::cell::RefCell;
 use std::sync::Mutex;
+use std::time::Duration;
 
-use core::generate_sas;
-use core::error::AzureRequestError;
-use super::brokeredmessage::*;
+use crate::core::error::AzureRequestError;
+use crate::core::generate_sas;
+use crate::servicebus::brokeredmessage::BrokeredMessage;
 
+use hyper::{
+    client::HttpConnector,
+    header::{HeaderMap, HeaderValue, AUTHORIZATION},
+    Body, Client, StatusCode,
+};
+use ::time as time2;
 use url;
-use time2;
-use hyper::client::Client;
-use hyper::header::*;
-use hyper::status::StatusCode;
 
 const SAS_BUFFER_TIME: usize = 15;
 
 // Ideally this should be a field on the client, but we don't want to expose it through
 // the trait, and if we don't then we can't share code.
-lazy_static!{
-    static ref CLIENT: Client = Client::new();
+lazy_static! {
+    static ref CLIENT: Client<HttpConnector, Body> = Client::builder()
+        .keep_alive(true)
+        .http2_only(true)
+        .build_http();
 }
 
 /// The Subscription Trait is an abstraction over different types of Subscription that
@@ -39,7 +46,8 @@ lazy_static!{
 /// in a different subscription. This way different processes can consume the message and not interfere
 /// with each other or have to worry about losing messages.
 pub trait Subscription
-    where Self: Sized
+where
+    Self: Sized,
 {
     /// The subscription name.
     fn subscription(&self) -> &str;
@@ -53,7 +61,6 @@ pub trait Subscription
 
     /// The endpoint for the Queue. `http://{namespace}.servicebus.net/`
     fn endpoint(&self) -> &url::Url;
-
 
     /// Receive a message from the subscription. Returns either the deserialized message or an error
     /// detailing what went wrong. The message will not be deleted on the server until
@@ -75,19 +82,21 @@ pub trait Subscription
     /// Receive a message from the subscription. Returns the deserialized message or an error.
     /// The message is deleted from the subscription when it is received. If the application crashes,
     /// the contents of the message can be lost.
-    fn receive_and_delete_with_timeout(&self,
-                                       timeout: Duration)
-                                       -> Result<BrokeredMessage, AzureRequestError> {
-
+    fn receive_and_delete_with_timeout(
+        &self,
+        timeout: Duration,
+    ) -> Result<BrokeredMessage, AzureRequestError> {
         let sas = self.refresh_sas();
-        let path = format!("{}/subscriptions/{}/messages/head?timeout={}",
-                           self.topic(),
-                           self.subscription(),
-                           timeout.as_secs());
+        let path = format!(
+            "{}/subscriptions/{}/messages/head?timeout={}",
+            self.topic(),
+            self.subscription(),
+            timeout.as_secs()
+        );
 
         let uri = self.endpoint().join(&path)?;
-        let mut header = Headers::new();
-        header.set(Authorization(sas));
+        let mut header = HeaderMap::new();
+        header.insert(AUTHORIZATION, HeaderValue::from_str(&sas).unwrap());
 
         let response = CLIENT.delete(uri).headers(header).send()?;
         interpret_results(response.status)?;
@@ -98,19 +107,22 @@ pub trait Subscription
     /// detailing what went wrong. The message will not be deleted on the server until
     /// `subscription_client.complete_message(message)` is called. This is ideal for applications that
     /// can't afford to miss a message. Allows a timeout to be specified for greater control.
-    fn receive_with_timeout(&self,
-                            timeout: Duration)
-                            -> Result<BrokeredMessage, AzureRequestError> {
+    fn receive_with_timeout(
+        &self,
+        timeout: Duration,
+    ) -> Result<BrokeredMessage, AzureRequestError> {
         let sas = self.refresh_sas();
-        let path = format!("{}/subscriptions/{}/messages/head?timeout={}",
-                           self.topic(),
-                           self.subscription(),
-                           timeout.as_secs());
+        let path = format!(
+            "{}/subscriptions/{}/messages/head?timeout={}",
+            self.topic(),
+            self.subscription(),
+            timeout.as_secs()
+        );
 
         let uri = self.endpoint().join(&path)?;
 
-        let mut header = Headers::new();
-        header.set(Authorization(sas));
+        let mut header = HeaderMap::new();
+        header.insert(AUTHORIZATION, HeaderValue::from_str(&sas).unwrap());
         let response = CLIENT.post(uri).headers(header).send()?;
         interpret_results(response.status)?;
         Ok(BrokeredMessage::with_response(response))
@@ -131,11 +143,10 @@ pub trait Subscription
         // Then add the lock token and finally join it into the targer
         let target = get_message_update_path(self, &message)?;
 
-        let mut header = Headers::new();
-        header.set(Authorization(sas));
+        let mut header = HeaderMap::new();
+        header.insert(AUTHORIZATION, HeaderValue::from_str(&sas).unwrap());
         let response = CLIENT.delete(target).headers(header).send()?;
         interpret_results(response.status)
-
     }
 
     /// Releases the lock on a message and puts it back into the queue.
@@ -148,11 +159,10 @@ pub trait Subscription
         // Then add the lock token and finally join it into the targer
         let target = get_message_update_path(self, &message)?;
 
-        let mut header = Headers::new();
-        header.set(Authorization(sas));
+        let mut header = HeaderMap::new();
+        header.insert(AUTHORIZATION, HeaderValue::from_str(&sas).unwrap());
         let response = CLIENT.put(target).headers(header).send()?;
         interpret_results(response.status)
-
     }
 
     /// Renews the lock on a message. If a message is received by calling
@@ -177,8 +187,8 @@ pub trait Subscription
         // Then add the lock token and finally join it into the targer
         let target = get_message_update_path(self, &message)?;
 
-        let mut header = Headers::new();
-        header.set(Authorization(sas));
+        let mut header = HeaderMap::new();
+        header.insert(AUTHORIZATION, HeaderValue::from_str(&sas).unwrap());
         let response = CLIENT.post(target).headers(header).send()?;
         interpret_results(response.status)
     }
@@ -192,7 +202,8 @@ pub trait Subscription
     /// });
     /// ```
     fn on_message<H>(&self, handler: H) -> AzureRequestError
-        where H: Fn(BrokeredMessage)
+    where
+        H: Fn(BrokeredMessage),
     {
         loop {
             let res = self.receive_and_delete();
@@ -221,10 +232,11 @@ impl SubscriptionClient {
     /// topic, and the name of a subscription.
     /// The connection string can be copied and pasted from the azure portal.
     /// The subscription name should be the name of an existing subscription.
-    pub fn with_conn_topic_and_subscr(connection_string: &str,
-                                      topic: &str,
-                                      subscription: &str)
-                                      -> Result<SubscriptionClient, url::ParseError> {
+    pub fn with_conn_topic_and_subscr(
+        connection_string: &str,
+        topic: &str,
+        subscription: &str,
+    ) -> Result<SubscriptionClient, url::ParseError> {
         let duration = Duration::from_secs(60 * 6);
         let mut endpoint = String::new();
         for param in connection_string.split(";") {
@@ -244,7 +256,7 @@ impl SubscriptionClient {
         endpoint = String::new() + "https" + endpoint.split_at(endpoint.find(":").unwrap_or(0)).1;
         let url = url::Url::parse(&endpoint)?;
 
-        let (sas_key, expiry) = generate_sas(connection_string, duration);
+        let (sas_key, expiry) = generate_sas(connection_string, duration).unwrap();
         let conn_string = connection_string.to_string();
 
         Ok(SubscriptionClient {
@@ -275,7 +287,7 @@ impl Subscription for SubscriptionClient {
         let mut sas_tuple = self.sas_info.borrow_mut();
         if curr_time > sas_tuple.1 {
             let duration = Duration::from_secs(60 * 6);
-            let (key, expiry) = generate_sas(&*self.connection_string, duration);
+            let (key, expiry) = generate_sas(&*self.connection_string, duration).unwrap();
             sas_tuple.1 = expiry;
             sas_tuple.0 = key;
         }
@@ -306,10 +318,11 @@ pub struct ConcurrentSubscriptionClient {
 }
 
 impl ConcurrentSubscriptionClient {
-    pub fn with_conn_topic_and_subscr(connection_string: &str,
-                                      topic: &str,
-                                      subscription: &str)
-                                      -> Result<ConcurrentSubscriptionClient, url::ParseError> {
+    pub fn with_conn_topic_and_subscr(
+        connection_string: &str,
+        topic: &str,
+        subscription: &str,
+    ) -> Result<ConcurrentSubscriptionClient, url::ParseError> {
         let duration = Duration::from_secs(60 * 6);
         let mut endpoint = String::new();
         for param in connection_string.split(";") {
@@ -328,7 +341,7 @@ impl ConcurrentSubscriptionClient {
         }
         endpoint = String::new() + "https" + endpoint.split_at(endpoint.find(":").unwrap_or(0)).1;
         let url = url::Url::parse(&endpoint)?;
-        let (sas_key, expiry) = generate_sas(connection_string, duration);
+        let (sas_key, expiry) = generate_sas(connection_string, duration).unwrap();
         let conn_string = connection_string.to_string();
 
         Ok(ConcurrentSubscriptionClient {
@@ -362,7 +375,7 @@ impl Subscription for ConcurrentSubscriptionClient {
         };
         if curr_time > sas_tuple.1 {
             let duration = Duration::from_secs(60 * 6);
-            let (key, expiry) = generate_sas(&*self.connection_string, duration);
+            let (key, expiry) = generate_sas(&*self.connection_string, duration).unwrap();
             sas_tuple.1 = expiry;
             sas_tuple.0 = key;
         }
@@ -370,45 +383,48 @@ impl Subscription for ConcurrentSubscriptionClient {
     }
 }
 
-
 // Here's one function that interprets what all of the error codes mean for consistency.
 // This might even get elevated out of this module, but preferabbly not.
 fn interpret_results(status: StatusCode) -> Result<(), AzureRequestError> {
-    use core::error::AzureRequestError::*;
+    use crate::core::error::AzureRequestError::*;
     match status {
-        StatusCode::Unauthorized => Err(AuthorizationFailure),
-        StatusCode::InternalServerError => Err(InternalError),
-        StatusCode::BadRequest => Err(BadRequest),
-        StatusCode::Forbidden => Err(ResourceFailure),
-        StatusCode::Gone => Err(ResourceNotFound),
+        StatusCode::UNAUTHORIZED => Err(AuthorizationFailure),
+        StatusCode::INTERNAL_SERVER_ERROR => Err(InternalError),
+        StatusCode::BAD_REQUEST => Err(BadRequest),
+        StatusCode::FORBIDDEN => Err(ResourceFailure),
+        StatusCode::GONE => Err(ResourceNotFound),
         // These are the successful cases.
-        StatusCode::Created => Ok(()),
-        StatusCode::Ok => Ok(()),
+        StatusCode::CREATED => Ok(()),
+        StatusCode::OK => Ok(()),
         _ => Err(UnknownError),
     }
 }
 
 // Complete, Abandon, Renew all make calls to the same Uri so here's a quick function
 // for generating it.
-fn get_message_update_path<T>(q: &T,
-                              message: &BrokeredMessage)
-                              -> Result<url::Url, AzureRequestError>
-    where T: Subscription
+fn get_message_update_path<T>(
+    q: &T,
+    message: &BrokeredMessage,
+) -> Result<url::Url, AzureRequestError>
+where
+    T: Subscription,
 {
-
     // Take either the Sequence number or the Message ID
     // Then add the lock token and finally join it into the targer
-    let target = message.props
+    let target = message
+        .props
         .SequenceNumber
         .map(|seq| seq.to_string())
         .or(message.props.MessageId.clone())
         .and_then(|id| message.props.LockToken.as_ref().map(|lock| (id, lock)))
         .map(|(id, lock)| {
-            format!("{}/subscriptions/{}/messages/{}/{}",
-                    q.topic(),
-                    q.subscription(),
-                    id,
-                    lock)
+            format!(
+                "{}/subscriptions/{}/messages/{}/{}",
+                q.topic(),
+                q.subscription(),
+                id,
+                lock
+            )
         })
         .and_then(|path| q.endpoint().join(&*path).ok())
         .ok_or(AzureRequestError::LocalMessage);

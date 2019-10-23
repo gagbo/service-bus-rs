@@ -1,16 +1,14 @@
-extern crate crypto;
+#![deny(rust_2018_idioms)]
+use crypto;
+use hyper;
 #[macro_use]
-extern crate hyper;
-#[macro_use]
-extern crate lazy_static;
-extern crate rustc_serialize as serialize;
-extern crate serde;
-#[macro_use]
-extern crate serde_derive;
-extern crate serde_json;
-extern crate time as time2;
-#[macro_use]
-extern crate url;
+use lazy_static;
+use rustc_serialize as serialize;
+use serde;
+use serde_derive;
+use serde_json;
+use ::time as time2;
+use url;
 
 /// Contains shared functionality between all the different
 /// modules inside of the Azure Libary
