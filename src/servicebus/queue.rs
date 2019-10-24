@@ -109,7 +109,7 @@ where
             BROKER_PROPERTIES_HEADER_NAME,
             message.props_as_json().parse().unwrap(),
         );
-        let body = message.get_body_raw().clone();
+        let body = message.get_body_raw().to_owned();
         let mut req = Request::builder()
             .method("POST")
             .uri(uri.as_str())

@@ -123,24 +123,22 @@ impl BrokeredMessage {
     /// lazily in the event that the body is malformed or not serialized.
     /// The message can still be completed or the body can be parsed from its raw contents.
     ///
-    pub fn with_response(mut response: Response<Body>) -> BrokeredMessage {
-        let mut body = response.body().collect().wait().unwrap();
+    pub fn with_response(response: Response<Body>) -> BrokeredMessage {
+        let props = Box::new(
+            response
+                .headers()
+                .get(BROKER_PROPERTIES_HEADER_NAME)
+                .and_then(|header| {
+                    serde_json::from_str::<BrokerProperties>(header.to_str().unwrap()).ok()
+                })
+                .unwrap_or(Default::default())
+                .clone(),
+        );
 
-        let props = response
-            .headers()
-            .get(BROKER_PROPERTIES_HEADER_NAME)
-            .and_then(|header| {
-                serde_json::from_str::<BrokerProperties>(header.to_str().unwrap()).ok()
-            })
-            .unwrap_or(Default::default());
+        let body =
+            String::from_utf8(response.into_body().concat2().wait().unwrap().to_vec()).unwrap();
 
-        BrokeredMessage {
-            body: body
-                .iter()
-                .map(|chunk| str::from_utf8(&chunk.into_bytes()).unwrap_or("COULD NOT CONVERT"))
-                .collect::<String>(),
-            props: Box::new(props),
-        }
+        BrokeredMessage { body, props }
     }
 
     /// Attempts to deserialize the body into a String loosely based on what the .Net client
