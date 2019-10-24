@@ -1,13 +1,13 @@
-use lazy_static::lazy_static;
 use crate::core::error::AzureRequestError;
-use hyper::header::HeaderName;
-use hyper::{Response, body::Body};
 use futures::{future::Future, stream::Stream};
+use hyper::header::HeaderName;
+use hyper::{body::Body, Response};
+use lazy_static::lazy_static;
 use serde_derive::{Deserialize, Serialize};
 use serde_json;
 use std::str;
 
-pub const BROKER_PROPERTIES_HEADER_NAME: &'static str = "brokerproperties";
+pub const BROKER_PROPERTIES_HEADER_NAME: &str = "brokerproperties";
 lazy_static! {
     pub static ref BROKER_PROPERTIES_HEADER: HeaderName =
         HeaderName::from_static(BROKER_PROPERTIES_HEADER_NAME);
@@ -135,7 +135,10 @@ impl BrokeredMessage {
             .unwrap_or(Default::default());
 
         BrokeredMessage {
-            body: body.iter().map(|chunk| str::from_utf8(&chunk.into_bytes()).unwrap_or("COULD NOT CONVERT")).collect::<String>(),
+            body: body
+                .iter()
+                .map(|chunk| str::from_utf8(&chunk.into_bytes()).unwrap_or("COULD NOT CONVERT"))
+                .collect::<String>(),
             props: Box::new(props),
         }
     }

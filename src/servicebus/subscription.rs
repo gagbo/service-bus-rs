@@ -1,8 +1,8 @@
+use futures::future::Future;
 use lazy_static::lazy_static;
 use std::cell::RefCell;
 use std::sync::Mutex;
 use std::time::Duration;
-use futures::future::Future;
 
 use crate::core::error::AzureRequestError;
 use crate::core::generate_sas;
@@ -94,12 +94,14 @@ where
             timeout.as_secs()
         );
 
-        let uri = self.endpoint().join(&path)?.as_str();
+        let uri = self.endpoint().join(&path)?;
         let mut header = HeaderMap::new();
         header.insert(AUTHORIZATION, HeaderValue::from_str(&sas).unwrap());
-        let req = Request::builder()
+        let mut req = Request::builder()
             .method("DELETE")
-            .uri(uri).body(Body::empty()).unwrap();
+            .uri(uri.as_str())
+            .body(Body::empty())
+            .unwrap();
         *(req.headers_mut()) = header;
 
         let response = CLIENT.request(req).wait()?;
@@ -123,13 +125,15 @@ where
             timeout.as_secs()
         );
 
-        let uri = self.endpoint().join(&path)?.as_str();
+        let uri = self.endpoint().join(&path)?;
 
         let mut header = HeaderMap::new();
         header.insert(AUTHORIZATION, HeaderValue::from_str(&sas).unwrap());
-        let req = Request::builder()
+        let mut req = Request::builder()
             .method("POST")
-            .uri(uri).body(Body::empty()).unwrap();
+            .uri(uri.as_str())
+            .body(Body::empty())
+            .unwrap();
         *(req.headers_mut()) = header;
 
         let response = CLIENT.request(req).wait()?;
@@ -150,13 +154,15 @@ where
 
         // Take either the Sequence number or the Message ID
         // Then add the lock token and finally join it into the targer
-        let target = get_message_update_path(self, &message)?.as_str();
+        let target = get_message_update_path(self, &message)?;
 
         let mut header = HeaderMap::new();
         header.insert(AUTHORIZATION, HeaderValue::from_str(&sas).unwrap());
-        let req= Request::builder()
+        let mut req = Request::builder()
             .method("DELETE")
-            .uri(target).body(Body::empty()).unwrap();
+            .uri(target.as_str())
+            .body(Body::empty())
+            .unwrap();
         *(req.headers_mut()) = header;
 
         let response = CLIENT.request(req).wait()?;
@@ -171,13 +177,15 @@ where
 
         // Take either the Sequence number or the Message ID
         // Then add the lock token and finally join it into the targer
-        let target = get_message_update_path(self, &message)?.as_str();
+        let target = get_message_update_path(self, &message)?;
 
         let mut header = HeaderMap::new();
         header.insert(AUTHORIZATION, HeaderValue::from_str(&sas).unwrap());
-        let req = Request::builder()
+        let mut req = Request::builder()
             .method("PUT")
-            .uri(target).body(Body::empty()).unwrap();
+            .uri(target.as_str())
+            .body(Body::empty())
+            .unwrap();
         *(req.headers_mut()) = header;
 
         let response = CLIENT.request(req).wait()?;
@@ -204,13 +212,15 @@ where
 
         // Take either the Sequence number or the Message ID
         // Then add the lock token and finally join it into the targer
-        let target = get_message_update_path(self, &message)?.as_str();
+        let target = get_message_update_path(self, &message)?;
 
         let mut header = HeaderMap::new();
         header.insert(AUTHORIZATION, HeaderValue::from_str(&sas).unwrap());
-        let req = Request::builder()
+        let mut req = Request::builder()
             .method("POST")
-            .uri(target).body(Body::empty()).unwrap();
+            .uri(target.as_str())
+            .body(Body::empty())
+            .unwrap();
         *(req.headers_mut()) = header;
 
         let response = CLIENT.request(req).wait()?;
@@ -435,7 +445,7 @@ where
 {
     // Take either the Sequence number or the Message ID
     // Then add the lock token and finally join it into the targer
-    let target = message
+    message
         .props
         .SequenceNumber
         .map(|seq| seq.to_string())
@@ -451,6 +461,5 @@ where
             )
         })
         .and_then(|path| q.endpoint().join(&*path).ok())
-        .ok_or(AzureRequestError::LocalMessage);
-    target
+        .ok_or(AzureRequestError::LocalMessage)
 }

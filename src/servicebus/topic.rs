@@ -1,23 +1,22 @@
+use futures::future::Future;
 use lazy_static::lazy_static;
 use std::cell::RefCell;
 use std::sync::Mutex;
 use std::time::Duration;
-use futures::future::Future;
 
 use crate::core::error::AzureRequestError;
 use crate::core::generate_sas;
-use crate::servicebus::brokeredmessage::{BrokeredMessage, BROKER_PROPERTIES_HEADER};
+use crate::servicebus::brokeredmessage::{BrokeredMessage, BROKER_PROPERTIES_HEADER_NAME};
 
 use hyper::{
     client::HttpConnector,
     header::{HeaderMap, HeaderValue, AUTHORIZATION, CONTENT_TYPE},
     Body, Client, Request, StatusCode,
 };
-use mime::Mime;
 use time as time2;
 use url;
 
-const UNIQUE_CONTENT_TYPE: &'static str = "application/atom+xml;type=entry;charset=utf-8";
+const UNIQUE_CONTENT_TYPE: &str = "application/atom+xml;type=entry;charset=utf-8";
 const SAS_BUFFER_TIME: usize = 15;
 
 // Ideally this should be a field on the client, but we don't want to expose it through
@@ -86,22 +85,21 @@ where
     ) -> Result<(), AzureRequestError> {
         let sas = self.refresh_sas();
         let path = format!("{}/messages?timeout={}", self.topic(), timeout.as_secs());
-        let uri = self.endpoint().join(&path)?.as_str();
+        let uri = self.endpoint().join(&path)?;
 
         let mut header = HeaderMap::new();
         header.insert(AUTHORIZATION, HeaderValue::from_str(&sas).unwrap());
 
-        // This will always succeed.
-        let content_type: Mime = UNIQUE_CONTENT_TYPE.parse().unwrap();
-        header.insert(CONTENT_TYPE, HeaderValue::from_str(&content_type).unwrap());
+        header.insert(CONTENT_TYPE, UNIQUE_CONTENT_TYPE.parse().unwrap());
         header.insert(
-            BROKER_PROPERTIES_HEADER,
-            HeaderValue::from_str(&message.props_as_json()).unwrap(),
+            BROKER_PROPERTIES_HEADER_NAME,
+            message.props_as_json().parse().unwrap(),
         );
-        let req = Request::builder()
+        let mut req = Request::builder()
             .method("POST")
-            .uri(uri)
-            .body(Body::from_str(message.get_body_raw())).unwrap();
+            .uri(uri.as_str())
+            .body(Body::from(message.get_body_raw().clone()))
+            .unwrap();
         *(req.headers_mut()) = header;
 
         let response = CLIENT.request(req).wait()?;

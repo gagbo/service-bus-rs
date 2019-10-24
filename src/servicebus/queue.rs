@@ -1,23 +1,22 @@
+use futures::future::Future;
 use lazy_static::lazy_static;
 use std::cell::RefCell;
 use std::sync::Mutex;
 use std::time::Duration;
-use futures::future::Future;
 
 use crate::core::error::AzureRequestError;
 use crate::core::generate_sas;
-use crate::servicebus::brokeredmessage::{BrokeredMessage, BROKER_PROPERTIES_HEADER};
+use crate::servicebus::brokeredmessage::{BrokeredMessage, BROKER_PROPERTIES_HEADER_NAME};
 
 use hyper::{
     client::HttpConnector,
     header::{HeaderMap, HeaderValue, AUTHORIZATION, CONTENT_TYPE},
     Body, Client, Request, StatusCode,
 };
-use mime::Mime;
 use time as time2;
 use url;
 
-const UNIQUE_CONTENT_TYPE: &'static str = "application/atom+xml;type=entry;charset=utf-8";
+const UNIQUE_CONTENT_TYPE: &str = "application/atom+xml;type=entry;charset=utf-8";
 const SAS_BUFFER_TIME: usize = 15;
 
 // Ideally this should be a field on the client, but we don't want to expose it through
@@ -100,22 +99,22 @@ where
     ) -> Result<(), AzureRequestError> {
         let sas = self.refresh_sas();
         let path = format!("{}/messages?timeout={}", self.queue(), timeout.as_secs());
-        let uri = self.endpoint().join(&*path)?.as_str();
+        let uri = self.endpoint().join(&*path)?;
 
         let mut header = HeaderMap::new();
         header.insert(AUTHORIZATION, HeaderValue::from_str(&sas).unwrap());
 
-        // This will always succeed.
-        let content_type: Mime = UNIQUE_CONTENT_TYPE.parse().unwrap();
-        header.insert(CONTENT_TYPE, HeaderValue::from_str(&content_type).unwrap());
+        header.insert(CONTENT_TYPE, UNIQUE_CONTENT_TYPE.parse().unwrap());
         header.insert(
-            BROKER_PROPERTIES_HEADER,
-            HeaderValue::from_str(&message.props_as_json()).unwrap(),
+            BROKER_PROPERTIES_HEADER_NAME,
+            message.props_as_json().parse().unwrap(),
         );
-        let req = Request::builder()
+        let body = message.get_body_raw().clone();
+        let mut req = Request::builder()
             .method("POST")
-            .uri(uri)
-            .body(Body::from_str(message.get_body_raw())).unwrap();
+            .uri(uri.as_str())
+            .body(Body::from(body))
+            .unwrap();
         *(req.headers_mut()) = header;
 
         let response = CLIENT.request(req).wait()?;
@@ -136,12 +135,14 @@ where
             timeout.as_secs()
         );
 
-        let uri = self.endpoint().join(&path)?.as_str();
+        let uri = self.endpoint().join(&path)?;
         let mut header = HeaderMap::new();
         header.insert(AUTHORIZATION, HeaderValue::from_str(&sas).unwrap());
-        let req = Request::builder()
+        let mut req = Request::builder()
             .method("DELETE")
-            .uri(uri).body(Body::empty()).unwrap();
+            .uri(uri.as_str())
+            .body(Body::empty())
+            .unwrap();
         *(req.headers_mut()) = header;
 
         let response = CLIENT.request(req).wait()?;
@@ -165,14 +166,16 @@ where
         );
 
         // Build the URI
-        let uri = self.endpoint().join(&path)?.as_str();
+        let uri = self.endpoint().join(&path)?;
         let mut header = HeaderMap::new();
         header.insert(AUTHORIZATION, HeaderValue::from_str(&sas).unwrap());
 
         // Send the request and wait for the response
-        let req = Request::builder()
+        let mut req = Request::builder()
             .method("POST")
-            .uri(uri).body(Body::empty()).unwrap();
+            .uri(uri.as_str())
+            .body(Body::empty())
+            .unwrap();
         *(req.headers_mut()) = header;
 
         let response = CLIENT.request(req).wait()?;
@@ -194,13 +197,15 @@ where
 
         // Take either the Sequence number or the Message ID
         // Then add the lock token and finally join it into the targer
-        let target = get_message_update_path(self, &message)?.as_str();
+        let target = get_message_update_path(self, &message)?;
 
         let mut header = HeaderMap::new();
         header.insert(AUTHORIZATION, HeaderValue::from_str(&sas).unwrap());
-        let req = Request::builder()
+        let mut req = Request::builder()
             .method("DELETE")
-            .uri(target).body(Body::empty()).unwrap();
+            .uri(target.as_str())
+            .body(Body::empty())
+            .unwrap();
         *(req.headers_mut()) = header;
 
         let response = CLIENT.request(req).wait()?;
@@ -215,13 +220,15 @@ where
 
         // Take either the Sequence number or the Message ID
         // Then add the lock token and finally join it into the targer
-        let target = get_message_update_path(self, &message)?.as_str();
+        let target = get_message_update_path(self, &message)?;
         let mut header = HeaderMap::new();
         header.insert(AUTHORIZATION, HeaderValue::from_str(&sas).unwrap());
 
-        let req = Request::builder()
+        let mut req = Request::builder()
             .method("PUT")
-            .uri(target).body(Body::empty()).unwrap();
+            .uri(target.as_str())
+            .body(Body::empty())
+            .unwrap();
         *(req.headers_mut()) = header;
 
         let response = CLIENT.request(req).wait()?;
@@ -248,13 +255,15 @@ where
 
         // Take either the Sequence number or the Message ID
         // Then add the lock token and finally join it into the targer
-        let target = get_message_update_path(self, &message)?.as_str();
+        let target = get_message_update_path(self, &message)?;
 
         let mut header = HeaderMap::new();
         header.insert(AUTHORIZATION, HeaderValue::from_str(&sas).unwrap());
-        let req = Request::builder()
+        let mut req = Request::builder()
             .method("POST")
-            .uri(target).body(Body::empty()).unwrap();
+            .uri(target.as_str())
+            .body(Body::empty())
+            .unwrap();
         *(req.headers_mut()) = header;
 
         let response = CLIENT.request(req).wait()?;
@@ -463,7 +472,7 @@ where
 {
     // Take either the Sequence number or the Message ID
     // Then add the lock token and finally join it into the targer
-    let target = message
+    message
         .props
         .SequenceNumber
         .map(|seq| seq.to_string())
@@ -471,14 +480,13 @@ where
         .and_then(|id| message.props.LockToken.as_ref().map(|lock| (id, lock)))
         .map(|(id, lock)| format!("/{}/messages/{}/{}", q.queue(), id, lock))
         .and_then(|path| q.endpoint().join(&*path).ok())
-        .ok_or(AzureRequestError::LocalMessage);
-    target
+        .ok_or(AzureRequestError::LocalMessage)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use servicebus::brokeredmessage::BrokeredMessage;
+    use crate::servicebus::brokeredmessage::BrokeredMessage;
 
     lazy_static! {
         static ref CONNECTION_STRING: String = {
@@ -572,7 +580,7 @@ mod tests {
                 println!("{:?}", e);
                 panic!("Failed to receive message.")
             }
-            Ok(message) => match queue.renew_message(message.clone()) {
+            Ok(message) => match queue.renew_message(&message.clone()) {
                 Err(e) => {
                     println!("{:?}", e);
                     println!("{:?}", message);
